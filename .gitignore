@@ -1,0 +1,14 @@
+# Python
+.venv/
+__pycache__/
+
+# Per-user settings (device names, folders)
+settings.json
+
+# Built locally with native/build_rnnoise.sh, not distributed
+native/rnnoise.dll
+zig/
+
+# Personal files
+backup/
+
