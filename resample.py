@@ -18,10 +18,10 @@ CHUNK = 1 << 16   # output samples made per pass, to limit memory use
 OVERSAMPLE = 512  # the weight curve is precomputed at this many points per sample
 
 
-def _kernel_table(cutoff, width):
-    """Precompute the weight curve once, so resample() can look values up.
+def kernel_table(cutoff, width):
+    """Calculate the averaging weights once, so they can be looked up later.
 
-    Calculating the curve fresh for every sample was the slow part.
+    Used by resample() and by DriftReader in mic_mixer.py.
     """
     d = np.linspace(-width, width, 2 * width * OVERSAMPLE + 1)
     u = d / width
@@ -42,7 +42,7 @@ def resample(x, src_rate, dst_rate):
     cutoff = min(1.0, ratio) * 0.95
     width = int(np.ceil(HALF_TAPS / cutoff))  # how many input samples each side get averaged
     padded = np.pad(x, (width, width + 1)).astype(np.float64)
-    table = _kernel_table(cutoff, width)
+    table = kernel_table(cutoff, width)
 
     out = np.empty(n_out, dtype=np.float32)
     for start in range(0, n_out, CHUNK):

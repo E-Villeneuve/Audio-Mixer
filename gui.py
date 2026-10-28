@@ -17,9 +17,76 @@ from mic_mixer import AUDIO_EXTS, AudioEngine, Mixer, list_sounds
 
 RATE = 48000
 BLOCK = 480
-SETTINGS_PATH = Path(__file__).with_name("settings.json")
+BASE_DIR = Path(__file__).parent
+SETTINGS_PATH = BASE_DIR / "settings.json"
 NO_MONITOR = "(none)"
 MIC_DB_MIN, MIC_DB_MAX = -20.0, 30.0
+NAME_MAX = 32       # longest sound name allowed
+LABEL_MAX = 18      # longer names are shortened with "…" on their button
+PAD_WIDTH = 150     # soundboard buttons are at least this wide, in pixels
+
+
+def path_to_setting(path):
+    """Files inside the project are saved relative to it, so the board still
+    works if the project folder is moved."""
+    try:
+        return path.resolve().relative_to(BASE_DIR.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def path_from_setting(text):
+    path = Path(text)
+    return path if path.is_absolute() else BASE_DIR / path
+
+
+def short_label(name):
+    return name if len(name) <= LABEL_MAX else name[:LABEL_MAX - 1].rstrip() + "…"
+
+
+def ask_name(parent, title, initial=""):
+    """Show a small dialog asking for a sound's name. Returns None if cancelled."""
+    top = tk.Toplevel(parent)
+    top.title(title)
+    top.configure(bg=theme.BG)
+    top.resizable(False, False)
+    top.transient(parent)
+    result = []
+
+    frame = ttk.Frame(top, padding=18)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text="Sound name").grid(row=0, column=0, columnspan=2, sticky="w")
+    var = tk.StringVar(value=initial[:NAME_MAX])
+    var.trace_add("write", lambda *a: len(var.get()) > NAME_MAX and var.set(var.get()[:NAME_MAX]))
+    entry = ttk.Entry(frame, textvariable=var, width=34)
+    entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 14))
+
+    def save(event=None):
+        name = var.get().strip()
+        if not name:
+            top.bell()
+            return
+        result.append(name)
+        top.destroy()
+
+    ttk.Button(frame, text="Cancel", command=top.destroy).grid(row=2, column=0, sticky="e")
+    ttk.Button(frame, text="Save", style="Accent.TButton", command=save).grid(
+        row=2, column=1, sticky="e", padx=(8, 0))
+    frame.columnconfigure(0, weight=1)
+    top.bind("<Return>", save)
+    top.bind("<Escape>", lambda e: top.destroy())
+
+    # Centre over the main window.
+    top.update_idletasks()
+    x = parent.winfo_rootx() + (parent.winfo_width() - top.winfo_width()) // 2
+    y = parent.winfo_rooty() + (parent.winfo_height() - top.winfo_height()) // 3
+    top.geometry(f"+{x}+{y}")
+    theme.dark_title_bar(top)
+    entry.focus_set()
+    entry.select_range(0, "end")
+    top.grab_set()
+    top.wait_window()
+    return result[0] if result else None
 
 
 def wasapi_devices():
@@ -53,10 +120,8 @@ class App:
         self.mixer = Mixer(RATE, mic_gain=1.0, sfx_gain=0.8)
         self.engine = None
         self.settings = self.load_settings()
-        self.sounds_dir = Path(self.settings.get("sounds_dir", "sounds"))
-        self.extra_files = [Path(p) for p in self.settings.get("extra_files", [])
-                            if Path(p).exists()]
-        self.sounds = []
+        self.board = self.load_board()  # list of {"name": str, "path": Path}
+        self.pads = []                  # (button, board entry) pairs currently shown
 
         theme.apply(root)
         root.title("Mic Mixer")
@@ -78,7 +143,7 @@ class App:
         ttk.Label(main, textvariable=self.status, style="Faint.TLabel").grid(
             row=3, column=0, sticky="w", pady=(10, 0))
 
-        self.refresh_sounds()
+        self.render_board()
         self.update_meter()
         self.start()
 
@@ -148,41 +213,46 @@ class App:
         self.run_btn.grid(row=0, column=2, sticky="ew", padx=(12, 0), pady=3)
 
     def build_sounds(self, parent):
-        outer, box = theme.card(parent, "~/sounds")
+        outer, box = theme.card(parent, "~/soundboard")
         outer.grid(row=1, column=0, sticky="nsew", pady=12)
         box.columnconfigure(0, weight=1)
-        box.rowconfigure(0, weight=1)
+        box.rowconfigure(1, weight=1)
 
-        # Styled like .terminal-body: page-dark inset, mono text, pink selection.
-        self.listbox = tk.Listbox(
-            box, activestyle="none", height=8, font=theme.MONO,
-            bg=theme.BG, fg=theme.MUTED, bd=0, relief="flat",
-            highlightthickness=1, highlightbackground=theme.LINE,
-            highlightcolor=theme.FAINT, selectbackground=theme.ACCENT,
-            selectforeground=theme.ACCENT_INK, selectborderwidth=0)
-        self.listbox.grid(row=0, column=0, sticky="nsew")
-        self.listbox.bind("<Double-Button-1>", lambda e: self.play_selected())
-        self.listbox.bind("<Return>", lambda e: self.play_selected())
-        scroll = ttk.Scrollbar(box, orient="vertical", command=self.listbox.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
-        self.listbox.configure(yscrollcommand=scroll.set)
+        bar = ttk.Frame(box, style="Card.TFrame")
+        bar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        ttk.Button(bar, text="+  Add sound", style="Accent.TButton",
+                   command=self.add_sounds).pack(side="left")
+        ttk.Button(bar, text="■  Stop all", command=self.mixer.stop_all).pack(side="right")
+        ttk.Label(bar, text="Right-click a sound to rename or remove it",
+                  style="FaintCard.TLabel").pack(side="left", padx=(12, 0))
 
-        playback = ttk.Frame(box, style="Card.TFrame")
-        playback.grid(row=0, column=2, sticky="n", padx=(12, 0))
-        ttk.Button(playback, text="▶  Play", command=self.play_selected,
-                   style="Accent.TButton").pack(fill="x", pady=(0, 3))
-        ttk.Button(playback, text="■  Stop all",
-                   command=self.mixer.stop_all).pack(fill="x", pady=3)
+        # The buttons sit in a frame inside a canvas, so the board can scroll.
+        self.board_canvas = tk.Canvas(box, bg=theme.SURFACE, highlightthickness=0, height=180)
+        self.board_canvas.grid(row=1, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(box, orient="vertical", command=self.board_canvas.yview)
+        scroll.grid(row=1, column=1, sticky="ns", padx=(6, 0))
+        self.board_canvas.configure(yscrollcommand=scroll.set)
+        self.board_frame = ttk.Frame(self.board_canvas, style="Card.TFrame")
+        window = self.board_canvas.create_window(0, 0, anchor="nw", window=self.board_frame)
+        self.board_frame.bind("<Configure>", lambda e: self.board_canvas.configure(
+            scrollregion=self.board_canvas.bbox("all")))
 
-        files = ttk.Frame(box, style="Card.TFrame")
-        files.grid(row=1, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        for text, cmd in [("Add files…", self.add_files), ("Remove", self.remove_selected),
-                          ("Folder…", self.choose_folder), ("Rescan", self.refresh_sounds)]:
-            ttk.Button(files, text=text, command=cmd).pack(side="left", padx=(0, 6))
+        def on_resize(event):
+            self.board_canvas.itemconfigure(window, width=event.width)
+            self.layout_board()
+        self.board_canvas.bind("<Configure>", on_resize)
 
-        self.folder_label = tk.StringVar()
-        ttk.Label(box, textvariable=self.folder_label, style="FaintCard.TLabel").grid(
-            row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        # The mouse wheel scrolls the board while the pointer is over it.
+        def wheel(event):
+            if self.board_frame.winfo_height() > self.board_canvas.winfo_height():
+                self.board_canvas.yview_scroll(-event.delta // 120, "units")
+        self.board_canvas.bind("<Enter>", lambda e: self.root.bind_all("<MouseWheel>", wheel))
+        self.board_canvas.bind("<Leave>", lambda e: self.root.unbind_all("<MouseWheel>"))
+
+        self.menu = tk.Menu(self.root, tearoff=False)
+        self.empty_label = ttk.Label(
+            self.board_frame, style="FaintCard.TLabel",
+            text="No sounds yet. Click  + Add sound  to import one.")
 
     def build_controls(self, parent):
         outer, box = theme.card(parent, "~/controls")
@@ -304,51 +374,87 @@ class App:
         else:
             self.start()
 
-    def refresh_sounds(self):
-        self.sounds_dir.mkdir(exist_ok=True)
-        found = list_sounds(self.sounds_dir)
-        self.sounds = found + [p for p in self.extra_files if p not in found]
-        self.listbox.delete(0, "end")
-        for p in self.sounds:
-            self.listbox.insert("end", f" {p.name}" if p.parent == self.sounds_dir
-                                else f" {p.name}   ({p.parent})")
-        self.folder_label.set(f"Folder: {self.sounds_dir.resolve()}")
-        self.mixer.preload(self.sounds)
+    # ---- soundboard --------------------------------------------------------
 
-    def play_selected(self):
-        sel = self.listbox.curselection()
-        if not sel:
-            self.status.set("Select a sound first (double-click also plays).")
+    def render_board(self):
+        """Rebuild the soundboard buttons from self.board."""
+        for button, _ in self.pads:
+            button.destroy()
+        self.pads = []
+        for entry in self.board:
+            missing = not entry["path"].exists()
+            button = ttk.Button(
+                self.board_frame, text=short_label(entry["name"]),
+                style="Missing.Pad.TButton" if missing else "Pad.TButton",
+                command=lambda e=entry: self.play(e))
+            button.bind("<Button-3>", lambda ev, e=entry: self.show_menu(ev, e))
+            self.pads.append((button, entry))
+        self.layout_board()
+        self.mixer.preload([e["path"] for e in self.board if e["path"].exists()])
+
+    def layout_board(self):
+        """Place the buttons in as many equal columns as fit the width."""
+        width = self.board_canvas.winfo_width()
+        cols = max(1, width // PAD_WIDTH)
+        # Columns in use share equal widths. Unused ones must leave the
+        # "uniform" group, or Tk squashes every column to nothing.
+        for c in range(max(cols, 12)):
+            used = c < cols
+            self.board_frame.columnconfigure(c, weight=int(used), uniform="pad" if used else "")
+        if not self.pads:
+            self.empty_label.grid(row=0, column=0, columnspan=cols, pady=30)
             return
-        self.mixer.play(self.sounds[sel[0]])  # load failures arrive via mixer.errors
+        self.empty_label.grid_forget()
+        for n, (button, _) in enumerate(self.pads):
+            button.grid(row=n // cols, column=n % cols, sticky="ew", padx=3, pady=3)
 
-    def add_files(self):
+    def play(self, entry):
+        if not entry["path"].exists():
+            self.status.set(f"Can't find the file for \"{entry['name']}\": {entry['path']}")
+            return
+        # Tagged by board entry, so only this button lights up even if another
+        # button uses the same file. Load failures arrive via mixer.errors.
+        self.mixer.play(entry["path"], tag=id(entry))
+
+    def add_sounds(self):
         patterns = " ".join(f"*{ext}" for ext in sorted(AUDIO_EXTS))
         paths = filedialog.askopenfilenames(
-            title="Add sound files", filetypes=[("Audio", patterns), ("All files", "*.*")])
-        for p in map(Path, paths):
-            if p not in self.extra_files:
-                self.extra_files.append(p)
-        self.refresh_sounds()
-
-    def remove_selected(self):
-        """Hide an added file from the list. Files in the folder are never deleted."""
-        sel = self.listbox.curselection()
-        if not sel:
+            title="Add sounds", filetypes=[("Audio", patterns), ("All files", "*.*")])
+        if not paths:
             return
-        path = self.sounds[sel[0]]
-        if path in self.extra_files:
-            self.extra_files.remove(path)
-            self.refresh_sounds()
+        if len(paths) == 1:
+            # One file: ask for a name, like Discord does.
+            name = ask_name(self.root, "Add sound", Path(paths[0]).stem)
+            if name is None:
+                return
+            self.board.append({"name": name, "path": Path(paths[0])})
         else:
-            self.status.set("That file lives in the sounds folder; move it out to remove it.")
+            # Several files: name them after their files; they can be renamed later.
+            self.board += [{"name": Path(p).stem[:NAME_MAX], "path": Path(p)} for p in paths]
+        self.board_changed()
 
-    def choose_folder(self):
-        folder = filedialog.askdirectory(title="Choose sounds folder",
-                                         initialdir=self.sounds_dir.resolve())
-        if folder:
-            self.sounds_dir = Path(folder)
-            self.refresh_sounds()
+    def show_menu(self, event, entry):
+        self.menu.delete(0, "end")
+        self.menu.add_command(label="Play", command=lambda: self.play(entry))
+        self.menu.add_command(label="Rename…", command=lambda: self.rename(entry))
+        self.menu.add_separator()
+        self.menu.add_command(label="Remove", command=lambda: self.remove(entry))
+        self.menu.tk_popup(event.x_root, event.y_root)
+
+    def rename(self, entry):
+        name = ask_name(self.root, "Rename sound", entry["name"])
+        if name is not None:
+            entry["name"] = name
+            self.board_changed()
+
+    def remove(self, entry):
+        """Take a sound off the board. The file itself is left alone."""
+        self.board.remove(entry)
+        self.board_changed()
+
+    def board_changed(self):
+        self.render_board()
+        self.save_settings()
 
     def update_meter(self):
         """Meters use a decibel scale from -60 dB (near silent) to 0 dB (maximum)."""
@@ -357,12 +463,20 @@ class App:
             frac = 0.0 if peak <= 1e-3 else min(1.0, 1 + 20 * math.log10(peak) / 60)
             width = meter.winfo_width()
             meter.coords("cover", int(width * frac), 0, width, meter.winfo_height())
+        # Light up the buttons whose sounds are playing.
+        playing = self.mixer.playing()
+        for button, entry in self.pads:
+            if not entry["path"].exists():
+                continue
+            style = "Playing.Pad.TButton" if id(entry) in playing else "Pad.TButton"
+            if button.cget("style") != style:
+                button.configure(style=style)
         # Load errors happen on background threads, but Tk can only be
         # updated from this one, so they're queued and shown here.
         while not self.mixer.errors.empty():
             path, e = self.mixer.errors.get()
             self.status.set(f"Could not load {Path(path).name}: {e}")
-        self.root.after(50, self.update_meter)
+        self.meter_job = self.root.after(50, self.update_meter)
 
     # ---- settings ---------------------------------------------------------
 
@@ -372,8 +486,19 @@ class App:
         except (OSError, ValueError):
             return {}
 
-    def on_close(self):
-        self.stop()
+    def load_board(self):
+        saved = self.settings.get("board")
+        if saved is not None:
+            return [{"name": e["name"], "path": path_from_setting(e["path"])}
+                    for e in saved if e.get("name") and e.get("path")]
+        # First run, or settings from before the soundboard: start with the
+        # files from the old sounds folder and added-files list.
+        folder = path_from_setting(self.settings.get("sounds_dir", "sounds"))
+        files = list_sounds(folder) if folder.is_dir() else []
+        files += [Path(p) for p in self.settings.get("extra_files", []) if Path(p) not in files]
+        return [{"name": p.stem[:NAME_MAX], "path": p} for p in files]
+
+    def save_settings(self):
         try:
             SETTINGS_PATH.write_text(json.dumps({
                 "mic": self.mic_var.get(),
@@ -382,11 +507,16 @@ class App:
                 "mic_gain_db": round(self.mic_gain_db.get(), 1),
                 "sfx_gain": round(self.sfx_gain.get(), 3),
                 "noise_suppression": self.denoise_on.get(),
-                "sounds_dir": str(self.sounds_dir),
-                "extra_files": [str(p) for p in self.extra_files],
+                "board": [{"name": e["name"], "path": path_to_setting(e["path"])}
+                          for e in self.board],
             }, indent=2))
         except OSError:
             pass
+
+    def on_close(self):
+        self.root.after_cancel(self.meter_job)
+        self.stop()
+        self.save_settings()
         self.mixer.close()
         self.root.destroy()
 

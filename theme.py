@@ -1,11 +1,11 @@
-"""Dark theme for the Tkinter GUI, using the colour tokens from style.css."""
+"""Dark theme for the Tkinter GUI."""
 
 import ctypes
 import sys
 import tkinter as tk
 from tkinter import font as tkfont, ttk
 
-# ---- tokens (style.css :root) ---------------------------------------------
+# colours
 BG = "#0d0b14"
 SURFACE = "#15121e"
 RAISED = "#1c1828"
@@ -49,8 +49,8 @@ def _family(root, *candidates):
     return next((c for c in candidates if c in available), "TkDefaultFont")
 
 
-def _dark_title_bar(root):
-    """Windows 11: dark title bar tinted to --bg. Silently skipped elsewhere."""
+def dark_title_bar(root):
+    """Windows 11: dark title bar tinted to BG, for any window. Skipped elsewhere."""
     if sys.platform != "win32":
         return
     try:
@@ -154,8 +154,37 @@ def apply(root):
           lightcolor=[("active", FAINT)],
           darkcolor=[("active", FAINT)])
 
+    # Soundboard buttons: a raised tile, pink while its sound is playing.
+    s.configure("Pad.TButton", background=RAISED, foreground=TEXT, bordercolor=LINE_STRONG,
+                lightcolor=RAISED, darkcolor=RAISED, padding=(10, 14), anchor="center")
+    s.map("Pad.TButton",
+          background=[("pressed", LINE), ("active", LINE)],
+          lightcolor=[("pressed", LINE), ("active", LINE)],
+          darkcolor=[("pressed", LINE), ("active", LINE)],
+          bordercolor=[("active", ACCENT)])
+    s.configure("Playing.Pad.TButton", background=ACCENT_SOFT, foreground=ACCENT_STRONG,
+                bordercolor=ACCENT, lightcolor=ACCENT_SOFT, darkcolor=ACCENT_SOFT)
+    s.map("Playing.Pad.TButton",
+          background=[("active", ACCENT_SOFT)],
+          lightcolor=[("active", ACCENT_SOFT)],
+          darkcolor=[("active", ACCENT_SOFT)])
+    s.configure("Missing.Pad.TButton", foreground=FAINT)
+
+    s.configure("TEntry", fieldbackground=RAISED, foreground=TEXT, bordercolor=LINE_STRONG,
+                lightcolor=RAISED, darkcolor=RAISED, padding=(8, 5))
+    s.map("TEntry", bordercolor=[("focus", ACCENT)])
+
+    # Right-click menus are plain Tk menus.
+    root.option_add("*Menu.background", RAISED)
+    root.option_add("*Menu.foreground", TEXT)
+    root.option_add("*Menu.activeBackground", ACCENT)
+    root.option_add("*Menu.activeForeground", ACCENT_INK)
+    root.option_add("*Menu.relief", "flat")
+    root.option_add("*Menu.borderWidth", 0)
+    root.option_add("*Menu.activeBorderWidth", 0)
+
     s.configure("TSeparator", background=LINE)
-    _dark_title_bar(root)
+    dark_title_bar(root)
 
 
 def gradient(canvas, width, height, start=CYAN, end=BLUE, tag="gradient"):

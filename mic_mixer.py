@@ -21,7 +21,7 @@ import sounddevice as sd
 import soundfile as sf
 
 import denoise
-from resample import resample
+from resample import OVERSAMPLE, kernel_table, resample
 
 AUDIO_EXTS = {".wav", ".flac", ".ogg", ".mp3", ".aiff", ".aif"}
 
@@ -92,6 +92,13 @@ class DriftReader:
     KI = KP * KP / 4    # how fast to learn a steady clock difference; this value
                         # settles on the right speed without overshooting
     SMOOTHING = 0.02    # averages the buffer level over ~0.5 s, so jitter doesn't cause wobble
+    # Changing speed means making new samples between the original ones. Each
+    # new sample averages 32 neighbours on each side, the same way
+    # resample.py does. Using fewer made "s" and "t" sounds dull.
+    HALF_TAPS = 32
+    CUTOFF = 0.94  # keep sounds up to 22.6 kHz, above the range of hearing
+    TABLE = kernel_table(CUTOFF, HALF_TAPS).astype(np.float32)  # the averaging weights
+    TAPS = np.arange(-HALF_TAPS + 1, HALF_TAPS + 1)  # neighbour offsets: -31 .. +32
 
     def __init__(self, ring, block, target_blocks=3):
         # The level is checked just before each read, so a target of 3 blocks
@@ -105,8 +112,10 @@ class DriftReader:
         self.reset()
 
     def reset(self):
-        self.src = np.zeros(1, dtype=np.float32)  # audio taken from the buffer but not yet used, plus 1 earlier sample
-        self.phase = 1.0                          # position in src of the next output sample
+        # Audio taken from the buffer, including the last few samples already
+        # played, which the averaging still needs.
+        self.src = np.zeros(self.HALF_TAPS, dtype=np.float32)
+        self.phase = float(self.HALF_TAPS)        # position in src of the next output sample
         self.ratio = 1.0                          # current playback speed (1.0 = normal)
         self.integral = 0.0
         self.fill_avg = 0.0
@@ -140,25 +149,27 @@ class DriftReader:
                                          -self.MAX_ADJUST, self.MAX_ADJUST))
 
         # Where each output sample falls in the input, at the chosen speed.
-        # Each one needs the input sample before it and the two after it.
         positions = self.phase + np.arange(frames) * self.ratio
-        need = int(positions[-1]) + 3 - len(self.src)
+        need = int(positions[-1]) + self.HALF_TAPS + 1 - len(self.src)
         if need > 0:
             if self.ring.size < need:
                 self.underruns += 1
                 self.primed = False  # refill the buffer after this block
             self.src = np.concatenate((self.src, self.ring.read(need)))
 
-        # Fit a smooth curve through the 4 nearest input samples and read the
-        # output sample off it (Catmull-Rom interpolation).
-        i = positions.astype(np.int64)
-        f = (positions - i).astype(np.float32)
-        y0, y1, y2, y3 = self.src[i - 1], self.src[i], self.src[i + 1], self.src[i + 2]
-        out = y1 + 0.5 * f * (y2 - y0 + f * (2 * y0 - 5 * y1 + 4 * y2 - y3
-                                             + f * (3 * (y1 - y2) + y3 - y0)))
+        # Each new sample is a weighted average of its neighbours. Closer
+        # neighbours count more; the weights come from TABLE.
+        base = positions.astype(np.int64)
+        frac = (positions - base).astype(np.float32)
+        idx = (self.TAPS - frac[:, None] + self.HALF_TAPS) * OVERSAMPLE
+        i = idx.astype(np.int64)
+        a = idx - i
+        w = self.TABLE[i] * (1.0 - a) + self.TABLE[i + 1] * a
+        samples = self.src[base[:, None] + self.TAPS]
+        out = (w * samples).sum(axis=1) / w.sum(axis=1)  # dividing keeps the volume the same
 
         next_pos = positions[-1] + self.ratio
-        cut = int(next_pos) - 1  # drop used samples, keeping 1 for the next curve
+        cut = int(next_pos) - (self.HALF_TAPS - 1)  # forget old samples, except the ones still needed
         self.src = self.src[cut:]
         self.phase = next_pos - cut
         return out.astype(np.float32, copy=False)
@@ -199,7 +210,7 @@ class Mixer:
         self.level = 0.0      # peak of the last output block, for meters
         self.mic_level = 0.0  # peak of the mic after gain, before the limiter
         self.limiter = Limiter()
-        self.voices = []  # list of [samples, position]
+        self.voices = []  # list of [samples, position, tag]
         self.lock = threading.Lock()
         self.generation = 0  # raised by stop_all, so sounds still loading don't start afterwards
         # Decoding happens on worker threads so Play never blocks the UI. Each
@@ -231,11 +242,13 @@ class Mixer:
             except OSError as e:
                 self.errors.put((path, e))
 
-    def play(self, path):
+    def play(self, path, tag=None):
         """Play a sound as soon as it's decoded: immediately if preloaded.
 
+        `tag` identifies the sound in playing(); it defaults to the path.
         Failures are reported through self.errors, not raised.
         """
+        tag = str(path) if tag is None else tag
         generation = self.generation
         try:
             key, future = self._load(path)
@@ -253,9 +266,14 @@ class Mixer:
                 return
             with self.lock:
                 if generation == self.generation:
-                    self.voices.append([samples, 0])
+                    self.voices.append([samples, 0, tag])
 
         future.add_done_callback(start)
+
+    def playing(self):
+        """Tags of the sounds playing right now (see play)."""
+        with self.lock:
+            return {voice[2] for voice in self.voices}
 
     def stop_all(self):
         with self.lock:
@@ -271,7 +289,7 @@ class Mixer:
         with self.lock:
             alive = []
             for voice in self.voices:
-                samples, pos = voice
+                samples, pos = voice[0], voice[1]
                 chunk = samples[pos:pos + frames]
                 sfx[:len(chunk)] += chunk * self.sfx_gain
                 voice[1] = pos + frames

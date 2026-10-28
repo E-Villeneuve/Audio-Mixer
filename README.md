@@ -13,7 +13,7 @@ sound files ──► resample ──► volume ──────┘
 
 Features:
 
-- A dark-themed GUI with device pickers, a sound list, gain sliders and live level meters.
+- A dark-themed GUI with device pickers, a Discord-style soundboard, gain sliders and live level meters.
 - Optional **RNNoise** noise suppression on your voice. The sound effects are left untouched.
 - Plays WAV, FLAC, OGG, MP3 and AIFF files, at any sample rate. Sounds load in the background, so playback starts instantly.
 - A drift-corrected buffer keeps latency around 25 ms without clicks, even though your mic and the cable run on separate clocks.
@@ -50,7 +50,15 @@ python gui.py
 4. Press **Start**.
 5. In Discord or another app, set the input device to **`CABLE Output (VB-Audio Virtual Cable)`**.
 
-To add sounds, drop files into the `sounds/` folder, use **Add files…**, or point **Folder…** at another directory. Double-click a sound, or select it and press **Play**.
+#### Soundboard
+
+Every sound is assigned to a button, and clicking it plays the sound.
+
+- **Add a sound:** click **+ Add sound**, pick an audio file and give it a name. If you pick several files at once, each one is named after its file.
+- **Rename or remove:** right-click a button. Removing a sound only takes it off the board; the file isn't deleted.
+- **Stop all** stops every sound that's playing. A button lights up pink while its sound plays.
+
+The board keeps a link to each file rather than a copy, so don't move or delete files you've added. A button whose file is missing turns grey. On first run, the board starts with whatever is in the `sounds/` folder.
 
 | Control | What it does |
 |---|---|
@@ -59,7 +67,7 @@ To add sounds, drop files into the `sounds/` folder, use **Add files…**, or po
 | Mute mic | Sends only the sound effects |
 | Noise suppression | Turns RNNoise on or off. It's greyed out if the DLL isn't installed, as explained below. |
 
-Your device choices, sliders and sound folder are saved to `settings.json` next to the script.
+Your device choices, sliders and soundboard are saved to `settings.json` next to the script.
 
 ### Command line
 
@@ -132,7 +140,7 @@ Notes:
 | `resample.py` | Windowed-sinc resampler for sound files |
 | `denoise.py` | ctypes wrapper around `rnnoise.dll` |
 | `native/build_rnnoise.sh` | Reproducible RNNoise build script |
-| `sounds/` | Default sound folder |
+| `sounds/` | Starting sounds for the soundboard, and the command line's default folder |
 
 ## Credits
 
